@@ -1,4 +1,4 @@
-name: AAPS CI
+name: AAPS Browser CI
 
 on:
   workflow_dispatch:
@@ -20,7 +20,7 @@ on:
 
 jobs:
   build:
-    name: Build AAPS
+    name: Build AAPS Browser Artifact
     runs-on: ubuntu-latest
     steps:
       - name: Decode Secrets Keystore Set and Oauth2 to Env
@@ -67,8 +67,6 @@ jobs:
           }
 
           # Check secrets
-          check_secret "$GDRIVE_OAUTH2" "GDRIVE_OAUTH2"
-          
           check_secret "$KEYSTORE_BASE64" "KEYSTORE_BASE64"
           check_secret "$KEYSTORE_PASSWORD" "KEYSTORE_PASSWORD"
           check_secret "$KEY_ALIAS" "KEY_ALIAS"
@@ -116,6 +114,7 @@ jobs:
           echo "✅ Keystore and credentials validated."
 
       - name: Decode GDrive OAuth2 secrets
+        if: env.GDRIVE_OAUTH2 != ''
         run: |
           echo "🔐 Decoding GDRIVE_OAUTH2..."
           DECODED=$(echo "${{ secrets.GDRIVE_OAUTH2 }}" | base64 -d)
@@ -132,6 +131,7 @@ jobs:
           echo "✅ GDRIVE_CLIENT_ID and GDRIVE_REFRESH_TOKEN extracted from GDRIVE_OAUTH2"
 
       - name: Retrieving Google Drive access token
+        if: env.GDRIVE_OAUTH2 != ''
         run: |
           echo "🔐 Getting Google OAuth2 access token..."
           TOKEN_RESPONSE=$(curl -s -X POST https://oauth2.googleapis.com/token \
@@ -205,7 +205,18 @@ jobs:
           mv app/build/outputs/apk/${{ env.VARIANT_FLAVOR }}/${{ env.VARIANT_TYPE }}/*.apk aaps-${{ env.VERSION }}${{ env.VERSION_SUFFIX }}.apk
           mv wear/build/outputs/apk/${{ env.VARIANT_FLAVOR }}/${{ env.VARIANT_TYPE }}/*.apk aaps-wear-${{ env.VERSION }}${{ env.VERSION_SUFFIX }}.apk
 
+      - name: Upload APKs as GitHub artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: aaps-${{ env.VERSION }}${{ env.VERSION_SUFFIX }}
+          path: |
+            aaps-${{ env.VERSION }}${{ env.VERSION_SUFFIX }}.apk
+            aaps-wear-${{ env.VERSION }}${{ env.VERSION_SUFFIX }}.apk
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Upload APKs to Google Drive
+        if: env.GDRIVE_OAUTH2 != ''
         run: |
           set -e
           echo "🔐 Start uploading APKs to Google Drive..."
@@ -289,3 +300,7 @@ jobs:
           upload_to_gdrive "aaps-wear-${VERSION}${VERSION_SUFFIX}.apk" "aaps-wear-${VERSION}${VERSION_SUFFIX}.apk"
 
           echo "🎉 APKs successfully uploaded to Google Drive!"
+
+      - name: Skip Google Drive upload
+        if: env.GDRIVE_OAUTH2 == ''
+        run: echo "ℹ️ GDRIVE_OAUTH2 is not configured. APKs are available as GitHub Actions artifacts instead."
