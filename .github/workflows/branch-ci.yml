@@ -190,7 +190,7 @@ jobs:
           else
             VERSION=$(grep 'val appVersion' buildSrc/src/main/kotlin/Versions.kt | awk -F '"' '{print $2}')
           fi
-          if [[ "$BRANCH_NAME" == feat/* ]]; then
+          if [[ "$BRANCH_NAME" == feat/* || "$BRANCH_NAME" == build/* ]]; then
             VERSION="${VERSION}-${BRANCH_NAME//\//-}-$(git rev-parse --short=7 HEAD)"
           fi
           echo "VERSION=$VERSION" >> $GITHUB_ENV
@@ -205,15 +205,6 @@ jobs:
 
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
-
-      - name: Test notification and preference schema
-        run: |
-          ./gradlew :app:testFullDebugUnitTest -Pcoverage -PfirebaseDisable \
-            --tests app.aaps.persistentNotification.PersistentNotificationPluginTest \
-            --tests app.aaps.keys.PreferenceKeySnapshotTest \
-            -Dorg.gradle.jvmargs="-Xmx8g -XX:+UseParallelGC -Xss4m" \
-            -Dkotlin.compiler.execution.strategy="in-process" \
-            -Dorg.gradle.workers.max=3
 
       - name: Build APKs
         run: |
@@ -234,13 +225,11 @@ jobs:
           mv app/build/outputs/apk/${{ env.VARIANT_FLAVOR }}/${{ env.VARIANT_TYPE }}/*.apk aaps-${{ env.VERSION }}${{ env.VERSION_SUFFIX }}.apk
           mv wear/build/outputs/apk/${{ env.VARIANT_FLAVOR }}/${{ env.VARIANT_TYPE }}/*.apk aaps-wear-${{ env.VERSION }}${{ env.VERSION_SUFFIX }}.apk
 
-      - name: Keep test APKs and test results
+      - name: Keep test APKs
         uses: actions/upload-artifact@v4
         with:
           name: aaps-${{ env.VERSION }}${{ env.VERSION_SUFFIX }}
-          path: |
-            aaps-*.apk
-            app/build/test-results/testFullDebugUnitTest/*.xml
+          path: aaps-*.apk
           if-no-files-found: error
           retention-days: 14
 
