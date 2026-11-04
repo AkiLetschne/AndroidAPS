@@ -78,7 +78,8 @@ import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.receiveAsFlow
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlin.math.round
 import kotlin.time.Duration.Companion.seconds
 import android.app.NotificationManager as AndroidNotificationManager
@@ -155,6 +156,8 @@ class PersistentNotificationPlugin(
     // End Samsung Live Notifications / Now Bar
 
     private var scope: CoroutineScope? = null
+    private val screenEvents = Channel<Unit>(Channel.CONFLATED)
+    private val notificationMutex = Mutex()
     private val deferredStart = DeferredForegroundStart()
     private var lastAutoNotificationContent: String = ""
 
@@ -163,7 +166,7 @@ class PersistentNotificationPlugin(
     private val screenStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             if (!preferences.get(BooleanKey.LiveUpdateLockScreenOnly)) return
-            scope?.launch { updateNotification() }
+            screenEvents.trySend(Unit)
         }
     }
 
@@ -197,6 +200,8 @@ class PersistentNotificationPlugin(
         // DummyService is what keeps AAPS out of Android's background execution limits. Starting it here
         // is idempotent (startService on a running service is a no-op).
         startDummyService()
+        screenEvents.receiveAsFlow()
+            .collectResilient(newScope, aapsLogger, LTag.CORE) { updateNotification() }
         val screenStateFilter = IntentFilter().apply {
             addAction(Intent.ACTION_SCREEN_OFF)
             addAction(Intent.ACTION_SCREEN_ON)
@@ -270,7 +275,12 @@ class PersistentNotificationPlugin(
         startDummyService()
     }
 
-    private suspend fun updateNotification(includeAuto: Boolean = false) {
+    // Keep an older, locked-screen update from overwriting the notification posted after unlocking.
+    private suspend fun updateNotification(includeAuto: Boolean = false) = notificationMutex.withLock {
+        updateNotificationContent(includeAuto)
+    }
+
+    private suspend fun updateNotificationContent(includeAuto: Boolean) {
         if (!config.appInitialized) return
         val pump = activePlugins.activePump
         var line1: String?
