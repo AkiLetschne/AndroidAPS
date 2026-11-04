@@ -202,7 +202,9 @@ class PersistentNotificationPlugin(
             addAction(Intent.ACTION_SCREEN_ON)
             addAction(Intent.ACTION_USER_PRESENT)
         }
-        ContextCompat.registerReceiver(context, screenStateReceiver, screenStateFilter, ContextCompat.RECEIVER_NOT_EXPORTED)
+        // USER_PRESENT comes from SystemUI's separate UID, so NOT_EXPORTED drops the unlock event.
+        // All three actions are protected system broadcasts; ordinary apps cannot send them.
+        ContextCompat.registerReceiver(context, screenStateReceiver, screenStateFilter, ContextCompat.RECEIVER_EXPORTED)
         // Without this the switch would only take effect with the next BG.
         preferences.observe(BooleanKey.LiveUpdateLockScreenOnly).drop(1)
             .collectResilient(newScope, aapsLogger, LTag.CORE) { updateNotification() }
