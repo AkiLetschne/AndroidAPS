@@ -208,7 +208,7 @@ jobs:
 
       - name: Test notification and preference schema
         run: |
-          ./gradlew :app:testFullReleaseUnitTest \
+          ./gradlew :app:testFullDebugUnitTest -Pcoverage -PfirebaseDisable \
             --tests app.aaps.persistentNotification.PersistentNotificationPluginTest \
             --tests app.aaps.keys.PreferenceKeySnapshotTest \
             -Dorg.gradle.jvmargs="-Xmx8g -XX:+UseParallelGC -Xss4m" \
@@ -240,7 +240,7 @@ jobs:
           name: aaps-${{ env.VERSION }}${{ env.VERSION_SUFFIX }}
           path: |
             aaps-*.apk
-            app/build/test-results/testFullReleaseUnitTest/*.xml
+            app/build/test-results/testFullDebugUnitTest/*.xml
           if-no-files-found: error
           retention-days: 14
 
