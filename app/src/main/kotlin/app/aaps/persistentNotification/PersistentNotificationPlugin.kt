@@ -456,7 +456,7 @@ class PersistentNotificationPlugin(
         if (bgIconText != null) {
             val ageMs = bgTimestamp?.let { dateUtil.now() - it } ?: Long.MAX_VALUE
             val stale = ageMs > BG_ICON_STALE_AFTER.inWholeMilliseconds
-            builder.setSmallIcon(BgNotificationIcon.create(bgIconText, strikeThrough = stale))
+            builder.setSmallIcon(BgNotificationIcon.create(bgIconText, stale = stale))
             // Redraw once the reading turns stale. A new reading replaces this job through the next update.
             staleIconJob?.cancel()
             staleIconJob = if (stale) null else scope?.launch {
