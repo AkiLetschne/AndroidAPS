@@ -40,6 +40,8 @@
     <!-- Ongoing notification preferences -->
     <string name="pref_title_live_update_lock_screen_only">Live update only on lock screen</string>
     <string name="pref_summary_live_update_lock_screen_only">Show the AAPS live update only when the phone is locked. When the phone is unlocked there is no chip in the status bar, so the icons of other notifications stay visible.</string>
+    <string name="pref_title_live_update_unlocked_bg_icon">Glucose as status bar icon when unlocked</string>
+    <string name="pref_summary_live_update_unlocked_bg_icon">Only works with \"Live update only on lock screen\". While the phone is unlocked the status bar icon of the AAPS notification shows the current glucose instead of the AAPS icon.</string>
 
     <!-- BG Source preferences -->
     <string name="pref_title_bg_source_upload_to_ns">Upload BG data to NS</string>

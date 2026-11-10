@@ -70,18 +70,22 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlin.math.round
+import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
 import android.app.NotificationManager as AndroidNotificationManager
 import app.aaps.core.interfaces.R as InterfacesR
@@ -162,6 +166,10 @@ class PersistentNotificationPlugin(
     private val deferredStart = DeferredForegroundStart()
     private var lastAutoNotificationContent: String = ""
 
+    // One-shot refresh for the moment the glucose in the status bar icon turns stale. Without it nothing would
+    // redraw the icon when no new reading comes in, because the notification is only updated on events.
+    private var staleIconJob: Job? = null
+
     // With "live update only on lock screen" the notification must change when the phone is locked or
     // unlocked, not only on the next BG. Screen off, screen on and unlock are the moments that can change it.
     private val screenStateReceiver = object : BroadcastReceiver() {
@@ -214,6 +222,8 @@ class PersistentNotificationPlugin(
         // Without this the switch would only take effect with the next BG.
         preferences.observe(BooleanKey.LiveUpdateLockScreenOnly).drop(1)
             .collectResilient(newScope, aapsLogger, LTag.CORE) { updateNotification() }
+        preferences.observe(BooleanKey.LiveUpdateUnlockedBgIcon).drop(1)
+            .collectResilient(newScope, aapsLogger, LTag.CORE) { updateNotification() }
     }
 
     /**
@@ -243,6 +253,8 @@ class PersistentNotificationPlugin(
         } catch (_: IllegalArgumentException) {
             // Not registered
         }
+        staleIconJob?.cancel()
+        staleIconJob = null
         scope?.cancel()
         scope = null
         deferredStart.cancel()
@@ -289,6 +301,7 @@ class PersistentNotificationPlugin(
         var line2: String? = null
         var line3: String? = null
         var bgStatusChipText: String? = null
+        var bgTimestamp: Long? = null
         var bgMetric: Metric? = null
         var metricValue: Metric.MetricValue? = null
         var unreadConversationBuilder: NotificationCompat.CarExtender.UnreadConversation.Builder? = null
@@ -298,6 +311,7 @@ class PersistentNotificationPlugin(
             val units = profileFunction.getUnits()
             if (lastBG != null) {
                 bgStatusChipText = profileUtil.fromMgdlToStringInUnits(lastBG.recalculated)
+                bgTimestamp = lastBG.timestamp
                 val fromMgdlToUnits = profileUtil.fromMgdlToUnits(lastBG.recalculated)
                 metricValue = if (units == GlucoseUnit.MMOL) {
                     // Always one decimal. The default minimum is 0, which showed 9.0 as "9" (#5240).
@@ -431,7 +445,31 @@ class PersistentNotificationPlugin(
         )
         builder.setOnlyAlertOnce(true)
         builder.setCategory(NotificationCompat.CATEGORY_STATUS)
-        builder.setSmallIcon(iconsProvider.getNotificationIcon())
+        // While unlocked with "live update only on lock screen" there is no live update chip. The status bar
+        // icon then can show the glucose instead of the AAPS icon, like xDrip and GlucoDataHandler do.
+        val bgIconText = bgStatusChipText?.takeIf {
+            it.isNotBlank() &&
+                preferences.get(BooleanKey.LiveUpdateLockScreenOnly) &&
+                preferences.get(BooleanKey.LiveUpdateUnlockedBgIcon) &&
+                !isPhoneLocked()
+        }
+        if (bgIconText != null) {
+            val ageMs = bgTimestamp?.let { dateUtil.now() - it } ?: Long.MAX_VALUE
+            val stale = ageMs > BG_ICON_STALE_AFTER.inWholeMilliseconds
+            builder.setSmallIcon(BgNotificationIcon.create(bgIconText, strikeThrough = stale))
+            // Redraw once the reading turns stale. A new reading replaces this job through the next update.
+            staleIconJob?.cancel()
+            staleIconJob = if (stale) null else scope?.launch {
+                delay(BG_ICON_STALE_AFTER.inWholeMilliseconds - ageMs + 1_000L)
+                // Drop the reference first: the update below cancels staleIconJob, which would be this very job.
+                staleIconJob = null
+                triggerNotificationUpdate()
+            }
+        } else {
+            staleIconJob?.cancel()
+            staleIconJob = null
+            builder.setSmallIcon(iconsProvider.getNotificationIcon())
+        }
         builder.setContentTitle(line1)
         if (line2 != null) builder.setContentText(line2)
         if (line3 != null) builder.setSubText(line3)
@@ -540,6 +578,7 @@ class PersistentNotificationPlugin(
 
         /** Short, so the notification shows a new BG at once, but long enough for one BG's burst. */
         val UPDATE_DEBOUNCE = 1.seconds
+        val BG_ICON_STALE_AFTER = 10.minutes
 
         /**
          * Splits the notification content between the drawer and the Now Bar on a Samsung phone.
