@@ -87,6 +87,11 @@ enum class BooleanKey(
         "live_update_lock_screen_only", false, KeysStrings.pref_title_live_update_lock_screen_only, KeysStrings.pref_summary_live_update_lock_screen_only,
         platforms = AppPlatform.ANDROID_ONLY
     ),
+    // Android only: the status bar icon of the ongoing notification. Independent of the live update.
+    StatusBarBgIcon(
+        "status_bar_bg_icon", false, KeysStrings.pref_title_status_bar_bg_icon, KeysStrings.pref_summary_status_bar_bg_icon,
+        platforms = AppPlatform.ANDROID_ONLY
+    ),
     AlertIncreaseVolume("gradually_increase_notification_volume", true, KeysStrings.pref_title_alert_increase_volume),
     AlertOverrideDoNotDisturb("alert_override_dnd", true, KeysStrings.pref_title_alert_override_dnd, KeysStrings.pref_summary_alert_override_dnd, defaultedBySM = true),
 
