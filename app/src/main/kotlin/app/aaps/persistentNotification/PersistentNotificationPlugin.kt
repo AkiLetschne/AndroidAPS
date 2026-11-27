@@ -9,6 +9,8 @@ import android.content.IntentFilter
 import android.graphics.BitmapFactory
 import android.graphics.drawable.Icon
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationCompat.Metric
@@ -18,6 +20,10 @@ import androidx.core.app.NotificationCompat.MetricStyle
 import androidx.core.app.RemoteInput
 import androidx.core.content.ContextCompat
 import androidx.core.os.bundleOf
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.ProcessLifecycleOwner
 import app.aaps.core.data.model.GlucoseUnit
 import app.aaps.core.data.model.TrendArrow
 import app.aaps.core.data.plugin.PluginType
@@ -69,18 +75,22 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlin.math.round
+import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
 import android.app.NotificationManager as AndroidNotificationManager
 import app.aaps.core.interfaces.R as InterfacesR
@@ -170,6 +180,17 @@ class PersistentNotificationPlugin(
         }
     }
 
+    // The notification is only updated on events, so the age of the BG ("5m ago") and the stale status bar icon
+    // would stand still until the next reading. This job posts another update at each full minute of that age.
+    private var ageRefreshJob: Job? = null
+
+    // The live update pill is hidden while AAPS is on screen. The status bar icon then is the only place where
+    // the glucose shows, so the notification is rebuilt when AAPS goes to the foreground or the background.
+    private val appVisibilityObserver = object : DefaultLifecycleObserver {
+        override fun onStart(owner: LifecycleOwner) = refreshForVisibilityChange()
+        override fun onStop(owner: LifecycleOwner) = refreshForVisibilityChange()
+    }
+
     @OptIn(FlowPreview::class)
     override suspend fun onStart() {
         super.onStart()
@@ -181,6 +202,11 @@ class PersistentNotificationPlugin(
             .collectResilient(newScope, aapsLogger, LTag.CORE, start = CoroutineStart.UNDISPATCHED) { triggerNotificationUpdate() }
         frequentUpdates(newScope)
             .collectResilient(newScope, aapsLogger, LTag.CORE) { triggerNotificationUpdate() }
+        // Switching the status bar icon on or off shows at once, not with the next reading
+        preferences.observe(BooleanKey.StatusBarBgIcon).drop(1)
+            .collectResilient(newScope, aapsLogger, LTag.CORE) { updateNotification() }
+        // Lifecycle observers are added on the main thread
+        Handler(Looper.getMainLooper()).post { ProcessLifecycleOwner.get().lifecycle.addObserver(appVisibilityObserver) }
         /// Android Auto - debounced to prevent rapid pop-ups
         // Flow's debounce means the same thing as Rx's: emit once the source has been quiet for the
         // period. UNDISPATCHED is not claimed here - merge subscribes to its sources in child
@@ -242,6 +268,9 @@ class PersistentNotificationPlugin(
         } catch (_: IllegalArgumentException) {
             // Not registered
         }
+        Handler(Looper.getMainLooper()).post { ProcessLifecycleOwner.get().lifecycle.removeObserver(appVisibilityObserver) }
+        ageRefreshJob?.cancel()
+        ageRefreshJob = null
         scope?.cancel()
         scope = null
         deferredStart.cancel()
@@ -268,6 +297,27 @@ class PersistentNotificationPlugin(
         return requests.receiveAsFlow().debounce(UPDATE_DEBOUNCE)
     }
 
+    private fun refreshForVisibilityChange() {
+        if (!preferences.get(BooleanKey.StatusBarBgIcon)) return
+        scope?.launch { updateNotification() }
+    }
+
+    // True while an activity of AAPS is on screen. The registry can be read from any thread.
+    private fun isAppInForeground(): Boolean =
+        ProcessLifecycleOwner.get().lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
+
+    /** Posts the next update at the next full minute of the BG's age (plus a second, so the minute has turned). */
+    private fun scheduleAgeRefresh(bgTimestamp: Long?) {
+        ageRefreshJob?.cancel()
+        ageRefreshJob = if (bgTimestamp == null) null else scope?.launch {
+            val ageMs = (dateUtil.now() - bgTimestamp).coerceAtLeast(0L)
+            delay(60_000L - ageMs % 60_000L + 1_000L)
+            // Drop the reference first: the update below cancels ageRefreshJob, which would be this very job.
+            ageRefreshJob = null
+            triggerNotificationUpdate()
+        }
+    }
+
     // Called from the collectors, which already run in a coroutine: no runBlocking, which held an IO
     // thread for the whole update.
     private suspend fun triggerNotificationUpdate(includeAuto: Boolean = false) {
@@ -288,6 +338,8 @@ class PersistentNotificationPlugin(
         var line2: String? = null
         var line3: String? = null
         var bgStatusChipText: String? = null
+        var bgTimestamp: Long? = null
+        var bgAgeText: String? = null
         var bgMetric: Metric? = null
         var metricValue: Metric.MetricValue? = null
         var unreadConversationBuilder: NotificationCompat.CarExtender.UnreadConversation.Builder? = null
@@ -297,6 +349,7 @@ class PersistentNotificationPlugin(
             val units = profileFunction.getUnits()
             if (lastBG != null) {
                 bgStatusChipText = profileUtil.fromMgdlToStringInUnits(lastBG.recalculated)
+                bgTimestamp = lastBG.timestamp
                 val fromMgdlToUnits = profileUtil.fromMgdlToUnits(lastBG.recalculated)
                 metricValue = if (units == GlucoseUnit.MMOL) {
                     // Always one decimal. The default minimum is 0, which showed 9.0 as "9" (#5240).
@@ -328,6 +381,10 @@ class PersistentNotificationPlugin(
                 } else {
                     line1 += " " + rh.gs(R.string.old_data)
                 }
+                val ageMinutes = ((dateUtil.now() - lastBG.timestamp) / 60_000L).coerceAtLeast(0L)
+                bgAgeText = rh.gs(R.string.bg_age_short, ageMinutes.toInt())
+                line1 += " $bgAgeText"
+                line1WithDelta += " $bgAgeText"
             } else {
                 line1 = rh.gs(CoreUiR.string.missed_bg_readings)
                 line1WithDelta = rh.gs(CoreUiR.string.missed_bg_readings)
@@ -413,12 +470,14 @@ class PersistentNotificationPlugin(
             line1 = rh.gs(CoreUiR.string.no_profile_set)
             line1WithDelta = rh.gs(CoreUiR.string.no_profile_set)
         }
-        val content = "$line1|$line2|$line3"
+        scheduleAgeRefresh(bgTimestamp)
+        // The age changes every minute and must not make Android Auto announce the same BG again.
+        val content = "$line1|$line2|$line3".let { c -> bgAgeText?.let { c.replace(" $it", "") } ?: c }
         if (includeAuto && content == lastAutoNotificationContent) return
         if (includeAuto) lastAutoNotificationContent = content
         val builder = NotificationCompat.Builder(context, notificationHolder.channelID)
         builder.setOngoing(true)
-        applyLiveUpdate(
+        val liveUpdateRequested = applyLiveUpdate(
             builder = builder,
             bgStatusChipText = bgStatusChipText,
             line1 = line1,
@@ -429,7 +488,20 @@ class PersistentNotificationPlugin(
         )
         builder.setOnlyAlertOnce(true)
         builder.setCategory(NotificationCompat.CATEGORY_STATUS)
-        builder.setSmallIcon(iconsProvider.getNotificationIcon())
+        // Status bar icon: the glucose instead of the AAPS icon, like xDrip and GlucoDataHandler do. Independent
+        // of the live update, except where the pill already shows the glucose: the pill has the small icon and
+        // the glucose beneath it, so with the glucose as icon it would show twice. While the pill is shown the
+        // AAPS icon stays. Android hides the pill when AAPS is on screen, then the glucose icon is used.
+        val bgIconText = bgStatusChipText?.takeIf {
+            it.isNotBlank() && preferences.get(BooleanKey.StatusBarBgIcon) && (!liveUpdateRequested || isAppInForeground())
+        }
+        if (bgIconText != null) {
+            val ageMs = bgTimestamp?.let { dateUtil.now() - it } ?: Long.MAX_VALUE
+            val stale = ageMs > BG_ICON_STALE_AFTER.inWholeMilliseconds
+            builder.setSmallIcon(BgNotificationIcon.create(bgIconText, strikeThrough = stale))
+        } else {
+            builder.setSmallIcon(iconsProvider.getNotificationIcon())
+        }
         builder.setContentTitle(line1)
         if (line2 != null) builder.setContentText(line2)
         if (line3 != null) builder.setSubText(line3)
@@ -449,6 +521,7 @@ class PersistentNotificationPlugin(
         notificationHolder.notification = notification
     }
 
+    /** Returns true when the notification asks for a live update pill (Android) or chip (Samsung) in the status bar. */
     private fun applyLiveUpdate(
         builder: NotificationCompat.Builder,
         bgStatusChipText: String?,
@@ -457,16 +530,16 @@ class PersistentNotificationPlugin(
         bgMetric: Metric?,
         line2: String?,
         line3: String?
-    ) {
+    ): Boolean {
         // The user wants the live update only on the lock screen. On Pixel a live update chip in the
         // status bar hides all other notification icons, so it is left out while the phone is unlocked.
-        if (preferences.get(BooleanKey.LiveUpdateLockScreenOnly) && !isPhoneLocked()) return
+        if (preferences.get(BooleanKey.LiveUpdateLockScreenOnly) && !isPhoneLocked()) return false
         // Samsung's own system UI (One UI 7+) does not render the standard Android promoted
         // notification below - it shows the lock-screen "Now Bar" and drawer "Live Notifications"
         // through its own proprietary extras, so that needs to be applied separately and does not
         // depend on the Android version gating below.
         applySamsungLiveUpdate(builder, line1, line1WithDelta, line2, line3)
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.BAKLAVA) return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.BAKLAVA) return Build.MANUFACTURER.equals(SAMSUNG_MANUFACTURER, ignoreCase = true)
         builder.setRequestPromotedOngoing(true)
         if (!bgStatusChipText.isNullOrBlank()) {
             builder.setShortCriticalText(bgStatusChipText)
@@ -478,6 +551,7 @@ class PersistentNotificationPlugin(
                     .setCriticalMetric(0)
             )
         }
+        return true
     }
 
     /**
@@ -538,6 +612,7 @@ class PersistentNotificationPlugin(
 
         /** Short, so the notification shows a new BG at once, but long enough for one BG's burst. */
         val UPDATE_DEBOUNCE = 1.seconds
+        val BG_ICON_STALE_AFTER = 10.minutes
 
         /**
          * Splits the notification content between the drawer and the Now Bar on a Samsung phone.
