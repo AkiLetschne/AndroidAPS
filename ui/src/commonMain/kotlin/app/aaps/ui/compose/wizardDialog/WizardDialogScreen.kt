@@ -672,9 +672,7 @@ internal fun WizardDialogContent(
                             onValueChange = onCarbsChange,
                             valueRange = 0.0..uiState.maxCarbs.toDouble(),
                             step = 1.0,
-                            unitLabel = TextRef.Literal("g"),
-                            // The result is calculated live. Without this, deleting "20" leaves 2 g in it.
-                            publishEmptyAsZero = true
+                            unitLabel = TextRef.Literal("g")
                         )
                         QuickAddButtons(
                             increment1 = uiState.carbsButtonIncrement1,
@@ -762,8 +760,7 @@ internal fun WizardDialogContent(
                         step = uiState.bolusStep,
                         unitLabel = CoreUiStrings.insulin_unit_shortname,
                         decimalPlaces = 2,
-                        modifier = itemModifier,
-                        publishEmptyAsZero = true
+                        modifier = itemModifier
                     )
 
                     // Carb Time (compact row with popup dialog)
